@@ -2,12 +2,78 @@
 // For license information, please see license.txt
 {% include "erpnext/public/js/controllers/accounts.js" %}
 
+const cache = {
+	exchange_rate: {},
+	account_currency: {},
+}
+
+const get_exchange_rate = async function(from_currency, to_currency, transaction_date){
+
+	if(cache.exchange_rate[transaction_date]){
+		if(cache.exchange_rate[transaction_date][from_currency] && cache.exchange_rate[transaction_date][from_currency][to_currency]){
+			return cache.exchange_rate[transaction_date][from_currency][to_currency]
+		}else if(cache.exchange_rate[transaction_date][to_currency] && cache.exchange_rate[transaction_date][to_currency][from_currency]){
+			return 1 / cache.exchange_rate[transaction_date][to_currency][from_currency]
+		}
+	}
+
+	const exchange_rate = (await frappe.call({
+		method: "erpnext.setup.utils.get_exchange_rate",
+		args: {
+			from_currency: from_currency,
+			to_currency: to_currency,
+			transaction_date: transaction_date
+		}
+	})).message
+
+	if(!cache.exchange_rate[transaction_date])
+		cache.exchange_rate[transaction_date] = {}
+
+	if(!cache.exchange_rate[transaction_date][from_currency])
+		cache.exchange_rate[transaction_date][from_currency] = {}
+
+	cache.exchange_rate[transaction_date][from_currency][to_currency] = exchange_rate
+
+	return exchange_rate
+}
+
+const get_account_currency = async function(account) {
+	if(cache.account_currency[account])
+		return cache.account_currency[account]
+	cache.account_currency[account] = (await frappe.db.get_value('Account', account, 'account_currency')).message.account_currency;
+	return cache.account_currency[account]
+}
+
+const get_total_deductions = async function (frm) {
+	const company_currency = frm.doc.company? frappe.get_doc(":Company", frm.doc.company).default_currency: null;
+	return frappe.utils.sum(await Promise.all((frm.doc.deductions || []).map(
+		async function(d) { 
+			if(company_currency && d.account){
+				const account_currency = await get_account_currency(d.account);
+				if(!account_currency && account_currency === company_currency)
+					return flt(d.amount)
+				const current_exchange_rate = await get_exchange_rate(account_currency, company_currency, frm.doc.posting_date)
+				const exchange_rate = frm.doc.payment_type == "Receive" ? 
+					((account_currency == frm.doc.paid_from_account_currency) ? frm.doc.source_exchange_rate : current_exchange_rate) 
+						: (frm.doc.payment_type == "Pay" ? 
+							((account_currency == frm.doc.paid_to_account_currency) ? frm.doc.target_exchange_rate : current_exchange_rate)
+								: current_exchange_rate)
+
+				return flt(d.amount * exchange_rate)
+			}
+			return flt(d.amount)
+		})));
+}
+
 frappe.ui.form.on('Payment Entry', {
 	onload: function(frm) {
 		if(frm.doc.__islocal) {
 			if (!frm.doc.paid_from) frm.set_value("paid_from_account_currency", null);
 			if (!frm.doc.paid_to) frm.set_value("paid_to_account_currency", null);
 		}
+		// if(frm.doc.__onload) {
+		// 	frm.set_value('difference_amount', 101)
+		// }
 	},
 
 	setup: function(frm) {
@@ -215,7 +281,7 @@ frappe.ui.form.on('Payment Entry', {
 		frm.refresh_fields();
 	},
 
-	set_dynamic_labels: function(frm) {
+	set_dynamic_labels: async function(frm) {
 		var company_currency = frm.doc.company? frappe.get_doc(":Company", frm.doc.company).default_currency: "";
 
 		frm.set_currency_labels(["base_paid_amount", "base_received_amount", "base_total_allocated_amount",
@@ -237,7 +303,10 @@ frappe.ui.form.on('Payment Entry', {
 		frm.set_currency_labels(["total_amount", "outstanding_amount", "allocated_amount"],
 			party_account_currency, "references");
 
-		frm.set_currency_labels(["amount"], company_currency, "deductions");
+		if(frm.doc.deductions[0] && frm.doc.deductions[0].account) {
+			const account_currency = await get_account_currency(frm.doc.deductions[0].account)
+			frm.set_currency_labels(["amount"], account_currency, "deductions");
+		}
 
 		cur_frm.set_df_property("source_exchange_rate", "description",
 			("1 " + frm.doc.paid_from_account_currency + " = [?] " + company_currency));
@@ -723,11 +792,10 @@ frappe.ui.form.on('Payment Entry', {
 		});
 	},
 
-	allocate_party_amount_against_ref_docs: function(frm, paid_amount) {
+	allocate_party_amount_against_ref_docs: async function(frm, paid_amount) {
 		var total_positive_outstanding_including_order = 0;
 		var total_negative_outstanding = 0;
-		var total_deductions = frappe.utils.sum($.map(frm.doc.deductions || [],
-			function(d) { return flt(d.amount) }));
+		var total_deductions = await get_total_deductions(frm)
 
 		paid_amount -= total_deductions;
 
@@ -812,11 +880,10 @@ frappe.ui.form.on('Payment Entry', {
 		frm.events.set_unallocated_amount(frm);
 	},
 
-	set_unallocated_amount: function(frm) {
+	set_unallocated_amount: async function(frm) {
 		var unallocated_amount = 0;
-		var total_deductions = frappe.utils.sum($.map(frm.doc.deductions || [],
-			function(d) { return flt(d.amount) }));
-
+		var total_deductions = await get_total_deductions(frm)
+		
 		if(frm.doc.party) {
 			if(frm.doc.payment_type == "Receive"
 				&& frm.doc.base_total_allocated_amount < frm.doc.base_received_amount + total_deductions
@@ -834,7 +901,7 @@ frappe.ui.form.on('Payment Entry', {
 		frm.trigger("set_difference_amount");
 	},
 
-	set_difference_amount: function(frm) {
+	set_difference_amount: async function(frm) {
 		var difference_amount = 0;
 		var base_unallocated_amount = flt(frm.doc.unallocated_amount) *
 			(frm.doc.payment_type=="Receive" ? frm.doc.source_exchange_rate : frm.doc.target_exchange_rate);
@@ -849,8 +916,7 @@ frappe.ui.form.on('Payment Entry', {
 			difference_amount = flt(frm.doc.base_paid_amount) - flt(frm.doc.base_received_amount);
 		}
 
-		var total_deductions = frappe.utils.sum($.map(frm.doc.deductions || [],
-			function(d) { return flt(d.amount) }));
+		var total_deductions = await get_total_deductions(frm)
 
 		frm.set_value("difference_amount", difference_amount - total_deductions);
 
@@ -1022,6 +1088,13 @@ frappe.ui.form.on('Payment Entry Reference', {
 })
 
 frappe.ui.form.on('Payment Entry Deduction', {
+	account: async function(frm) {
+		if(frm.selected_doc.account) {
+			const account_currency = await get_account_currency(frm.selected_doc.account)
+			frm.set_currency_labels(["amount"], account_currency, "deductions");
+		}
+	},
+
 	amount: function(frm) {
 		frm.events.set_unallocated_amount(frm);
 	},
