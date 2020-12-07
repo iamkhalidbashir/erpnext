@@ -91,21 +91,26 @@ def get_exchange_rate(from_currency, to_currency, transaction_date=None, args=No
 	if entries:
 		return flt(entries[0].exchange_rate)
 
+	if transaction_date == nowdate():
+		transaction_date = 'latest'
+
 	try:
 		cache = frappe.cache()
-		key = "currency_exchange_rate_{0}:{1}:{2}".format(transaction_date,from_currency, to_currency)
+		key = "currency_exchange_rate_{0}:{1}:{2}".format(transaction_date, from_currency, to_currency)
 		value = cache.get(key)
 
 		if not value:
 			import requests
-			api_url = "https://frankfurter.app/{0}".format(transaction_date)
+			api_url = "http://data.fixer.io/api/{0}".format(transaction_date)
 			response = requests.get(api_url, params={
-				"base": from_currency,
-				"symbols": to_currency
+				"access_key": "1aef759ded464b6db0d83312f9c6f800",
+				"base": "EUR",
+				"symbols": "{0},{1}".format(to_currency, from_currency)
 			})
 			# expire in 6 hours
 			response.raise_for_status()
-			value = response.json()["rates"][to_currency]
+			eur_to_from_currency = response.json()["rates"][from_currency]
+			value = response.json()["rates"][to_currency] / eur_to_from_currency
 
 			cache.set_value(key, value, expires_in_sec=6 * 60 * 60)
 		return flt(value)
