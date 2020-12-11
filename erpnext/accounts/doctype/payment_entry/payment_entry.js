@@ -71,9 +71,6 @@ frappe.ui.form.on('Payment Entry', {
 			if (!frm.doc.paid_from) frm.set_value("paid_from_account_currency", null);
 			if (!frm.doc.paid_to) frm.set_value("paid_to_account_currency", null);
 		}
-		// if(frm.doc.__onload) {
-		// 	frm.set_value('difference_amount', 101)
-		// }
 	},
 
 	setup: function(frm) {
@@ -302,11 +299,6 @@ frappe.ui.form.on('Payment Entry', {
 
 		frm.set_currency_labels(["total_amount", "outstanding_amount", "allocated_amount"],
 			party_account_currency, "references");
-
-		if(frm.doc.deductions[0] && frm.doc.deductions[0].account) {
-			const account_currency = await get_account_currency(frm.doc.deductions[0].account)
-			frm.set_currency_labels(["amount"], account_currency, "deductions");
-		}
 
 		cur_frm.set_df_property("source_exchange_rate", "description",
 			("1 " + frm.doc.paid_from_account_currency + " = [?] " + company_currency));
